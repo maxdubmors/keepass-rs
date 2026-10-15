@@ -71,7 +71,7 @@ mod kdbx4_tests {
         config::{CompressionConfig, DatabaseConfig, InnerCipherConfig, KdfConfig, OuterCipherConfig},
         db::Database,
         format::KDBX4_CURRENT_MINOR_VERSION,
-        key::DatabaseKey,
+        key::{DatabaseKey, OpenKey},
     };
 
     #[cfg(feature = "challenge_response")]
@@ -100,7 +100,7 @@ mod kdbx4_tests {
         let mut encrypted_db = Vec::new();
         dump_kdbx4(&db, &db_key, &mut encrypted_db).unwrap();
 
-        let decrypted_db = parse_kdbx4(&encrypted_db, &db_key).unwrap();
+        let decrypted_db = parse_kdbx4(&encrypted_db, &OpenKey::Key(&db_key)).unwrap();
 
         assert_eq!(decrypted_db.num_entries(), 3);
     }
@@ -129,7 +129,7 @@ mod kdbx4_tests {
         let mut encrypted_db = Vec::new();
         dump_kdbx4(&db, &db_key, &mut encrypted_db).unwrap();
 
-        let decrypted_db = parse_kdbx4(&encrypted_db, &db_key).unwrap();
+        let decrypted_db = parse_kdbx4(&encrypted_db, &OpenKey::Key(&db_key)).unwrap();
 
         assert_eq!(decrypted_db.num_entries(), 3);
 
@@ -208,7 +208,7 @@ mod kdbx4_tests {
         let mut encrypted_db = Vec::new();
         dump_kdbx4(&db, &db_key, &mut encrypted_db).unwrap();
 
-        let decrypted_db = parse_kdbx4(&encrypted_db, &db_key).unwrap();
+        let decrypted_db = parse_kdbx4(&encrypted_db, &OpenKey::Key(&db_key)).unwrap();
 
         assert_eq!(decrypted_db.num_entries(), 1);
 
@@ -275,7 +275,7 @@ mod kdbx4_tests {
         let mut encrypted_db = Vec::new();
         dump_kdbx4(&db, &db_key, &mut encrypted_db).unwrap();
 
-        let decrypted_db = parse_kdbx4(&encrypted_db, &db_key).unwrap();
+        let decrypted_db = parse_kdbx4(&encrypted_db, &OpenKey::Key(&db_key)).unwrap();
 
         dbg!(&db, &decrypted_db);
 

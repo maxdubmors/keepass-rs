@@ -9,6 +9,7 @@ use crate::{
         kdbx4::{decrypt_kdbx4, parse_kdbx4},
         DatabaseVersionParseError,
     },
+    key::OpenKey,
     DatabaseKey,
 };
 
@@ -23,13 +24,30 @@ impl Database {
 
     /// Parse a database from a byte slice
     pub fn parse(data: &[u8], key: DatabaseKey) -> Result<Database, DatabaseOpenError> {
+        Database::parse_with(data, &OpenKey::Key(&key))
+    }
+
+    /// Parse a database from a byte slice with a key the database's KDF has already transformed,
+    /// without running the KDF.
+    ///
+    /// The transformed key is tied to the KDF seed and parameters in the file's header: once
+    /// another client saves the database with a fresh KDF seed, it no longer opens the file
+    /// and this returns an incorrect key error.
+    pub fn parse_with_transformed_key(
+        data: &[u8],
+        transformed_key: &[u8; 32],
+    ) -> Result<Database, DatabaseOpenError> {
+        Database::parse_with(data, &OpenKey::Transformed(transformed_key))
+    }
+
+    fn parse_with(data: &[u8], key: &OpenKey<'_>) -> Result<Database, DatabaseOpenError> {
         let database_version = DatabaseVersion::parse(data)?;
 
         match database_version {
-            DatabaseVersion::KDB(_) => parse_kdb(data, &key),
+            DatabaseVersion::KDB(_) => parse_kdb(data, key),
             DatabaseVersion::KDB2(_) => Err(DatabaseOpenError::UnsupportedVersion),
-            DatabaseVersion::KDB3(_) => parse_kdbx3(data, &key),
-            DatabaseVersion::KDB4(_) => parse_kdbx4(data, &key),
+            DatabaseVersion::KDB3(_) => parse_kdbx3(data, key),
+            DatabaseVersion::KDB4(_) => parse_kdbx4(data, key),
         }
     }
 
@@ -43,8 +61,8 @@ impl Database {
         let data = match database_version {
             DatabaseVersion::KDB(_) => return Err(DatabaseOpenError::UnsupportedVersion),
             DatabaseVersion::KDB2(_) => return Err(DatabaseOpenError::UnsupportedVersion),
-            DatabaseVersion::KDB3(_) => decrypt_kdbx3(data.as_ref(), &key)?.2,
-            DatabaseVersion::KDB4(_) => decrypt_kdbx4(data.as_ref(), &key)?.3,
+            DatabaseVersion::KDB3(_) => decrypt_kdbx3(data.as_ref(), &OpenKey::Key(&key))?.2,
+            DatabaseVersion::KDB4(_) => decrypt_kdbx4(data.as_ref(), &OpenKey::Key(&key))?.3,
         };
 
         Ok(data)

@@ -3,11 +3,11 @@ use crate::{
     crypt::calculate_sha256,
     db::{fields, Database, DatabaseFormatError, DatabaseOpenError, GroupId, Value},
     format::DatabaseVersion,
-    key::{DatabaseKey, DatabaseKeyError},
+    key::{DatabaseKey, DatabaseKeyError, OpenKey},
 };
 
 use byteorder::{ByteOrder, LittleEndian};
-use hybrid_array::Array as GenericArray;
+use hybrid_array::{typenum::U32, Array as GenericArray};
 use thiserror::Error;
 
 use std::{
@@ -391,17 +391,11 @@ fn parse_entries(
     Ok(())
 }
 
-pub(crate) fn parse_kdb(data: &[u8], db_key: &DatabaseKey) -> Result<Database, DatabaseOpenError> {
-    let header = KDBHeader::try_from(data)?;
-    let version = DatabaseVersion::KDB(header.subversion as u16);
-
-    // Rest of file after header is payload
-    let payload_encrypted = data.get(HEADER_SIZE..).ok_or(DatabaseOpenError::UnexpectedEof)?;
-
-    // derive master key from composite key, transform_seed, transform_rounds and master_seed
+/// KDB hashes the key elements a second time only when there are several
+fn kdb_composite_key(db_key: &DatabaseKey) -> Result<GenericArray<u8, U32>, DatabaseKeyError> {
     let key_elements = db_key.get_key_elements()?;
     let key_elements: Vec<&[u8]> = key_elements.iter().map(|v| &v[..]).collect();
-    let composite_key = if key_elements.len() == 1 {
+    Ok(if key_elements.len() == 1 {
         #[allow(clippy::indexing_slicing, clippy::expect_used)] // key_elements is guaranteed to be 1 byte
         let key_element: [u8; 32] = key_elements[0]
             .try_into()
@@ -409,16 +403,25 @@ pub(crate) fn parse_kdb(data: &[u8], db_key: &DatabaseKey) -> Result<Database, D
         GenericArray::from(key_element) // single pass of SHA256, already done before the call to parse()
     } else {
         calculate_sha256(&key_elements) // second pass of SHA256
-    };
+    })
+}
+
+pub(crate) fn parse_kdb(data: &[u8], key: &OpenKey<'_>) -> Result<Database, DatabaseOpenError> {
+    let header = KDBHeader::try_from(data)?;
+    let version = DatabaseVersion::KDB(header.subversion as u16);
+
+    // Rest of file after header is payload
+    let payload_encrypted = data.get(HEADER_SIZE..).ok_or(DatabaseOpenError::UnexpectedEof)?;
 
     // KDF is always AES
     let kdf_config = KdfConfig::Aes {
         rounds: u64::from(header.transform_rounds),
     };
 
-    let transformed_key = kdf_config
-        .get_kdf_seeded(&header.transform_seed)
-        .transform_key(&composite_key)?;
+    // derive master key from composite key, transform_seed, transform_rounds and master_seed
+    let transformed_key = key.transform(&kdf_config, &header.transform_seed, |db_key| {
+        Ok(kdb_composite_key(db_key)?)
+    })?;
 
     let master_key = calculate_sha256(&[&header.master_seed, &transformed_key]);
 
