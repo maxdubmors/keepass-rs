@@ -5,10 +5,36 @@ use quick_xml::{encoding::EncodingError, events::Event, reader::Reader, XmlVersi
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::crypt::calculate_sha256;
+use hybrid_array::{typenum::U32, Array as GenericArray};
+
+use crate::{config::KdfConfig, crypt::calculate_sha256, db::DatabaseOpenError};
 
 pub type KeyElement = Vec<u8>;
 pub type KeyElements = Vec<KeyElement>;
+
+/// What opens a database: a key for the KDF to transform, or a key it has already transformed.
+pub(crate) enum OpenKey<'a> {
+    Key(&'a DatabaseKey),
+    Transformed(&'a [u8; 32]),
+}
+
+impl OpenKey<'_> {
+    /// The transformed key: as given, or the composite key of the key, run through the KDF of
+    /// `kdf_config` seeded with `seed`
+    pub(crate) fn transform(
+        &self,
+        kdf_config: &KdfConfig,
+        seed: &[u8],
+        composite_key: impl FnOnce(&DatabaseKey) -> Result<GenericArray<u8, U32>, DatabaseOpenError>,
+    ) -> Result<GenericArray<u8, U32>, DatabaseOpenError> {
+        match self {
+            OpenKey::Key(db_key) => Ok(kdf_config
+                .get_kdf_seeded(seed)
+                .transform_key(&composite_key(db_key)?)?),
+            OpenKey::Transformed(transformed_key) => Ok(GenericArray::from(**transformed_key)),
+        }
+    }
+}
 
 #[cfg(feature = "challenge_response")]
 mod yubikey;
@@ -199,6 +225,22 @@ impl DatabaseKey {
     /// Create a new, empty database key
     pub fn new() -> Self {
         Default::default()
+    }
+
+    /// The composite key of a KDBX database: the SHA-256 of the key elements, which the KDF
+    /// transforms.
+    ///
+    /// A client that caches it can open the database again after another client has saved it
+    /// with a fresh KDF seed, without asking for the password or key file. With a
+    /// challenge-response key, perform the challenge first.
+    pub fn composite_key(&self) -> Result<[u8; 32], DatabaseKeyError> {
+        Ok(self.composite_key_kdbx()?.into())
+    }
+
+    pub(crate) fn composite_key_kdbx(&self) -> Result<GenericArray<u8, U32>, DatabaseKeyError> {
+        let key_elements = self.get_key_elements()?;
+        let key_elements: Vec<&[u8]> = key_elements.iter().map(|v| &v[..]).collect();
+        Ok(calculate_sha256(&key_elements))
     }
 
     pub(crate) fn get_key_elements(&self) -> Result<KeyElements, DatabaseKeyError> {
