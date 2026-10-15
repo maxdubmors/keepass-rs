@@ -3,10 +3,11 @@ use crate::{
     crypt::{calculate_sha256, ciphers::Cipher},
     db::{Database, DatabaseFormatError, DatabaseOpenError},
     format::DatabaseVersion,
-    key::{DatabaseKey, DatabaseKeyError},
+    key::{DatabaseKeyError, OpenKey},
 };
 
 use byteorder::{ByteOrder, LittleEndian};
+use hybrid_array::Array as GenericArray;
 use thiserror::Error;
 
 use std::convert::TryFrom;
@@ -183,8 +184,8 @@ pub enum Kdbx3OuterHeaderError {
 }
 
 /// Open, decrypt and parse a KeePass database from a source and a password
-pub(crate) fn parse_kdbx3(data: &[u8], db_key: &DatabaseKey) -> Result<Database, DatabaseOpenError> {
-    let (config, mut inner_decryptor, xml) = decrypt_kdbx3(data, db_key)?;
+pub(crate) fn parse_kdbx3(data: &[u8], key: &OpenKey<'_>) -> Result<Database, DatabaseOpenError> {
+    let (config, mut inner_decryptor, xml) = decrypt_kdbx3(data, key)?;
 
     // Parse XML data blocks
     let mut db = crate::format::xml_db::parse_xml(&xml, &[], &mut *inner_decryptor)
@@ -199,7 +200,7 @@ pub(crate) fn parse_kdbx3(data: &[u8], db_key: &DatabaseKey) -> Result<Database,
 #[allow(clippy::type_complexity)]
 pub(crate) fn decrypt_kdbx3(
     data: &[u8],
-    db_key: &DatabaseKey,
+    key: &OpenKey<'_>,
 ) -> Result<(DatabaseConfig, Box<dyn Cipher>, Vec<u8>), DatabaseOpenError> {
     let version = DatabaseVersion::parse(data)?;
     let header = parse_outer_header(data)
@@ -225,15 +226,18 @@ pub(crate) fn decrypt_kdbx3(
     let payload_encrypted = data.get(pos..).ok_or(DatabaseOpenError::UnexpectedEof)?;
 
     // derive master key from composite key, transform_seed, transform_rounds and master_seed
-    let key_elements = db_key.get_key_elements()?;
-    let key_elements: Vec<&[u8]> = key_elements.iter().map(|v| &v[..]).collect();
-    let composite_key = calculate_sha256(&key_elements);
+    let transformed_key = match key {
+        OpenKey::Key(db_key) => {
+            let composite_key = db_key.composite_key_kdbx()?;
 
-    // transform the key
-    let transformed_key = config
-        .kdf_config
-        .get_kdf_seeded(&header.transform_seed)
-        .transform_key(&composite_key)?;
+            // transform the key
+            config
+                .kdf_config
+                .get_kdf_seeded(&header.transform_seed)
+                .transform_key(&composite_key)?
+        }
+        OpenKey::Transformed(transformed_key) => GenericArray::from(**transformed_key),
+    };
 
     let master_key = calculate_sha256(&[header.master_seed.as_ref(), &transformed_key]);
 

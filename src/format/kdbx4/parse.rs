@@ -3,6 +3,7 @@
 use std::convert::{TryFrom, TryInto};
 
 use byteorder::{ByteOrder, LittleEndian};
+use hybrid_array::Array as GenericArray;
 use thiserror::Error;
 
 use crate::{
@@ -20,14 +21,14 @@ use crate::{
         variant_dictionary::VariantDictionary,
         DatabaseVersion,
     },
-    key::{DatabaseKey, DatabaseKeyError},
+    key::{DatabaseKeyError, OpenKey},
 };
 
 use super::KDBX4InnerHeader;
 
 /// Open, decrypt and parse a KeePass database from a source and key elements
-pub(crate) fn parse_kdbx4(data: &[u8], db_key: &DatabaseKey) -> Result<Database, DatabaseOpenError> {
-    let (config, header_attachments, mut inner_decryptor, xml) = decrypt_kdbx4(data, db_key)?;
+pub(crate) fn parse_kdbx4(data: &[u8], key: &OpenKey<'_>) -> Result<Database, DatabaseOpenError> {
+    let (config, header_attachments, mut inner_decryptor, xml) = decrypt_kdbx4(data, key)?;
 
     let mut db = crate::format::xml_db::parse_xml(&xml, &header_attachments, &mut *inner_decryptor)
         .map_err(|e| DatabaseOpenError::Format(DatabaseFormatError::Kdbx4(Kdbx4OpenError::Xml(e))))?;
@@ -41,7 +42,7 @@ pub(crate) fn parse_kdbx4(data: &[u8], db_key: &DatabaseKey) -> Result<Database,
 #[allow(clippy::type_complexity)]
 pub(crate) fn decrypt_kdbx4(
     data: &[u8],
-    db_key: &DatabaseKey,
+    key: &OpenKey<'_>,
 ) -> Result<(DatabaseConfig, Vec<Value<Vec<u8>>>, Box<dyn Cipher>, Vec<u8>), DatabaseOpenError> {
     let version = DatabaseVersion::parse(data)?;
 
@@ -76,17 +77,20 @@ pub(crate) fn decrypt_kdbx4(
         )));
     }
 
-    #[cfg(feature = "challenge_response")]
-    let db_key = db_key.clone().perform_challenge(&outer_header.kdf_seed)?;
-
     // derive master key from composite key, transform_seed, transform_rounds and master_seed
-    let key_elements = db_key.get_key_elements()?;
-    let key_elements: Vec<&[u8]> = key_elements.iter().map(|v| &v[..]).collect();
-    let composite_key = crypt::calculate_sha256(&key_elements);
-    let transformed_key = outer_header
-        .kdf_config
-        .get_kdf_seeded(&outer_header.kdf_seed)
-        .transform_key(&composite_key)?;
+    let transformed_key = match key {
+        OpenKey::Key(db_key) => {
+            #[cfg(feature = "challenge_response")]
+            let db_key = &db_key.clone().perform_challenge(&outer_header.kdf_seed)?;
+
+            let composite_key = db_key.composite_key_kdbx()?;
+            outer_header
+                .kdf_config
+                .get_kdf_seeded(&outer_header.kdf_seed)
+                .transform_key(&composite_key)?
+        }
+        OpenKey::Transformed(transformed_key) => GenericArray::from(**transformed_key),
+    };
     let master_key = crypt::calculate_sha256(&[outer_header.master_seed.as_ref(), &transformed_key]);
 
     // verify credentials
